@@ -54,7 +54,7 @@ import { removeCommand } from './remove.ts';
 import { sanitizeMetadata } from './sanitize.ts';
 import { track } from './telemetry.ts';
 import { agents, isUniversalAgent } from './agents.ts';
-import type { AgentType } from './types.ts';
+import type { AgentType, Skill } from './types.ts';
 
 const RESET = '\x1b[0m';
 const BOLD = '\x1b[1m';
@@ -123,6 +123,28 @@ function reportInstall(
 /** Skills present on disk in a scope; a locked skill missing here is reinstalled. */
 async function installedSkillNames(global: boolean): Promise<Set<string>> {
   return new Set((await listInstalledSkills({ global })).map((skill) => skill.name));
+}
+
+/**
+ * The clone's skills with their repo-relative SKILL.md paths, for resolving
+ * locked paths against. Discovery walks a bounded depth, so each locked
+ * folder is checked as well: a skill still there is current, not relocated
+ * to a same-name folder discovery did reach.
+ */
+async function discoverCloneSkills(
+  tempDir: string,
+  lockedPaths: Array<string | undefined>
+): Promise<{ skills: Skill[]; locations: DiscoveredSkillLocation[] }> {
+  const skills = await discoverSkills(tempDir, undefined, {
+    fullDepth: true,
+    includeDuplicateNames: true,
+    knownSkillDirs: lockedPaths.flatMap((path) => (path ? [dirname(path)] : [])),
+  });
+  const locations = skills.map((skill) => ({
+    name: skill.name,
+    skillPath: join(relative(tempDir, skill.path), 'SKILL.md').split(sep).join('/'),
+  }));
+  return { skills, locations };
 }
 
 function targetOutcome(results: TargetInstallResult[]): { ok: boolean; failed: string[] } {
@@ -855,14 +877,10 @@ export async function updateGlobalSkills(
     if (note) console.log(`  ${DIM}${note}${RESET}`);
 
     try {
-      const discovered = await discoverSkills(tempDir, undefined, {
-        fullDepth: true,
-        includeDuplicateNames: true,
-      });
-      const discoveredLocations = discovered.map((skill) => ({
-        name: skill.name,
-        skillPath: join(relative(tempDir, skill.path), 'SKILL.md').split(sep).join('/'),
-      }));
+      const { locations: discoveredLocations } = await discoverCloneSkills(
+        tempDir,
+        lockedNamesFor(firstEntry).map((name) => lock.skills[name]?.skillPath)
+      );
 
       const resolution = await checkAndPromptForDeletions(
         source,
@@ -1149,15 +1167,10 @@ export async function updateProjectSkills(
 
     let checked = false;
     try {
-      const discovered = await discoverSkills(tempDir, undefined, {
-        fullDepth: true,
-        includeDuplicateNames: true,
-      });
-
-      const discoveredLocations = discovered.map((skill) => ({
-        name: skill.name,
-        skillPath: join(relative(tempDir, skill.path), 'SKILL.md').split(sep).join('/'),
-      }));
+      const { skills: discovered, locations: discoveredLocations } = await discoverCloneSkills(
+        tempDir,
+        allLockedForSource.map((name) => localLock.skills[name]?.skillPath)
+      );
 
       const resolution = await checkAndPromptForDeletions(
         source,

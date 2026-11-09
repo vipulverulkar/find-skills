@@ -149,6 +149,8 @@ export interface DiscoverSkillsOptions {
   fullDepth?: boolean;
   /** Preserve duplicate skill names so callers can detect ambiguous locations */
   includeDuplicateNames?: boolean;
+  /** Repo-relative skill folders to check however deep they sit, such as those a lock file records */
+  knownSkillDirs?: string[];
 }
 
 /**
@@ -324,6 +326,12 @@ export async function discoverSkills(
         seenNames.add(skill.name);
       }
     }
+  }
+
+  // A locked folder can sit deeper than the walk reaches; a skill still there
+  // is current, not deleted or relocated.
+  for (const dir of options?.knownSkillDirs ?? []) {
+    if (isSubpathSafe(basePath, dir)) await tryAddSkillAt(join(basePath, dir));
   }
 
   return skills;

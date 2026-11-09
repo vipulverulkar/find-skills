@@ -285,6 +285,7 @@ describe('Update Cleanup Unit Tests', () => {
       expect(skills.discoverSkills).toHaveBeenCalledWith('/tmp/repo', undefined, {
         fullDepth: true,
         includeDuplicateNames: true,
+        knownSkillDirs: ['plugins/help-me-read/skills/help-me-read'],
       });
       expect(p.confirm).not.toHaveBeenCalled();
       expect(remove.removeCommand).not.toHaveBeenCalled();
@@ -1092,6 +1093,7 @@ describe('Update Cleanup Unit Tests', () => {
       expect(skills.discoverSkills).toHaveBeenCalledWith('/tmp/repo', undefined, {
         fullDepth: true,
         includeDuplicateNames: true,
+        knownSkillDirs: ['plugins/example/skills/deep-skill'],
       });
       expect(p.confirm).not.toHaveBeenCalled();
       expect(remove.removeCommand).not.toHaveBeenCalled();

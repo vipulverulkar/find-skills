@@ -30,7 +30,6 @@ import {
   agents,
   getUniversalAgents,
   getVisibleUniversalAgents,
-  getNonUniversalAgents,
   isUniversalAgent,
   readsCanonicalGlobally,
   getEveSubagents,
@@ -577,19 +576,53 @@ export function skipAgentsWithoutGlobalDir(
 }
 
 /**
+ * Asks whether to install globally (true) or into the project (false).
+ * Runs onCancel before exiting when the user cancels.
+ */
+async function promptForInstallScope(onCancel?: () => Promise<void>): Promise<boolean> {
+  const scope = await p.select({
+    message: 'Installation scope',
+    options: [
+      {
+        value: false,
+        label: 'Project',
+        hint: 'Install in current directory (committed with your project)',
+      },
+      {
+        value: true,
+        label: 'Global',
+        hint: 'Install in home directory (available across all projects)',
+      },
+    ],
+  });
+
+  if (p.isCancel(scope)) {
+    await onCancel?.();
+    exitInstallationCancelled();
+  }
+
+  return scope;
+}
+
+/**
  * Interactive agent selection using fuzzy search.
  * Shows universal agents as locked (always selected), and other agents as selectable.
+ * In global mode, universal agents that do not read ~/.agents/skills (e.g. Antigravity)
+ * need their own global directory, so they are offered as selectable agents instead.
  */
-async function selectAgentsInteractive(options: {
+export async function selectAgentsInteractive(options: {
   global?: boolean;
 }): Promise<AgentType[] | symbol> {
   // Filter out agents that don't support global installation when --global is used
   const supportsGlobalFilter = (a: AgentType) => !options.global || agents[a].globalSkillsDir;
+  const coveredByCanonical = (a: AgentType) =>
+    options.global ? readsCanonicalGlobally(a) : isUniversalAgent(a);
+  const isLocked = (a: AgentType) => supportsGlobalFilter(a) && coveredByCanonical(a);
 
-  const universalAgents = getUniversalAgents().filter(supportsGlobalFilter);
-  const visibleUniversalAgents = getVisibleUniversalAgents().filter(supportsGlobalFilter);
-  const otherAgents = getNonUniversalAgents().filter(
-    (agent) => agent !== 'eve' && supportsGlobalFilter(agent)
+  const universalAgents = getUniversalAgents().filter(isLocked);
+  const visibleUniversalAgents = getVisibleUniversalAgents().filter(isLocked);
+  const otherAgents = (Object.keys(agents) as AgentType[]).filter(
+    (agent) => agent !== 'eve' && supportsGlobalFilter(agent) && !coveredByCanonical(agent)
   );
 
   // Universal agents shown as locked section
@@ -602,14 +635,14 @@ async function selectAgentsInteractive(options: {
     hiddenCount: universalAgents.length - visibleUniversalAgents.length,
   };
 
-  // Other agents are selectable with their skillsDir as hint
+  // Other agents are selectable, with the directory they install into as hint
   const otherChoices = otherAgents.map((a) => ({
     value: a,
     label: agents[a].displayName,
     hint: options.global ? agents[a].globalSkillsDir! : agents[a].skillsDir,
   }));
 
-  // Get last selected agents (filter to only non-universal ones for initial selection)
+  // Get last selected agents (filter to only selectable ones for initial selection)
   let lastSelected: string[] | undefined;
   try {
     lastSelected = await getLastSelectedAgents();
@@ -618,9 +651,7 @@ async function selectAgentsInteractive(options: {
   }
 
   const initialSelected = lastSelected
-    ? (lastSelected.filter(
-        (a) => otherAgents.includes(a as AgentType) && !universalAgents.includes(a as AgentType)
-      ) as AgentType[])
+    ? (lastSelected.filter((a) => otherAgents.includes(a as AgentType)) as AgentType[])
     : [];
 
   const selected = await searchMultiselect({
@@ -1023,6 +1054,7 @@ async function handleWellKnownSkills(
 
   // Detect agents
   let targetAgents: AgentType[];
+  let scope = options.global;
   const validAgents = Object.keys(agents);
 
   if (options.agent?.includes('*')) {
@@ -1074,7 +1106,9 @@ async function handleWellKnownSkills(
         );
       }
     } else {
-      const selected = await selectAgentsInteractive({ global: options.global });
+      // Ask the scope first: a global prompt offers agents with their own global dir.
+      scope ??= await promptForInstallScope();
+      const selected = await selectAgentsInteractive({ global: scope });
 
       if (isCancelled(selected)) {
         exitInstallationCancelled();
@@ -1084,34 +1118,13 @@ async function handleWellKnownSkills(
     }
   }
 
-  let installGlobally = options.global ?? false;
-
   // Check if any selected agents support global installation
   const supportsGlobal = targetAgents.some((a) => agents[a].globalSkillsDir !== undefined);
 
-  if (options.global === undefined && !options.yes && supportsGlobal) {
-    const scope = await p.select({
-      message: 'Installation scope',
-      options: [
-        {
-          value: false,
-          label: 'Project',
-          hint: 'Install in current directory (committed with your project)',
-        },
-        {
-          value: true,
-          label: 'Global',
-          hint: 'Install in home directory (available across all projects)',
-        },
-      ],
-    });
-
-    if (p.isCancel(scope)) {
-      exitInstallationCancelled();
-    }
-
-    installGlobally = scope as boolean;
+  if (scope === undefined && !options.yes && supportsGlobal) {
+    scope = await promptForInstallScope();
   }
+  const installGlobally = scope ?? false;
 
   targetAgents = skipAgentsWithoutGlobalDir(targetAgents, {
     global: installGlobally,
@@ -2638,6 +2651,7 @@ export async function runAdd(args: string[], options: AddOptions = {}): Promise<
       : Promise.resolve(null);
 
     let targetAgents: AgentType[];
+    let scope = options.global;
     const validAgents = Object.keys(agents);
 
     if (options.agent?.includes('*')) {
@@ -2671,7 +2685,8 @@ export async function runAdd(args: string[], options: AddOptions = {}): Promise<
           if (!options.yes) explicitlySelectedAgents.add('eve');
           p.log.info(`Installing to: ${pc.cyan(EVE_AGENT_LABEL)}`);
         } else {
-          const selected = await selectAgentsInteractive({ global: options.global });
+          scope ??= await promptForInstallScope(() => cleanup(tempDir));
+          const selected = await selectAgentsInteractive({ global: scope });
 
           if (isCancelled(selected)) {
             await cleanup(tempDir);
@@ -2721,7 +2736,9 @@ export async function runAdd(args: string[], options: AddOptions = {}): Promise<
           );
         }
       } else {
-        const selected = await selectAgentsInteractive({ global: options.global });
+        // Ask the scope first: a global prompt offers agents with their own global dir.
+        scope ??= await promptForInstallScope(() => cleanup(tempDir));
+        const selected = await selectAgentsInteractive({ global: scope });
 
         if (isCancelled(selected)) {
           await cleanup(tempDir);
@@ -2777,35 +2794,13 @@ export async function runAdd(args: string[], options: AddOptions = {}): Promise<
       }
     }
 
-    let installGlobally = options.global ?? false;
-
     // Check if any selected agents support global installation
     const supportsGlobal = targetAgents.some((a) => agents[a].globalSkillsDir !== undefined);
 
-    if (options.global === undefined && !options.yes && supportsGlobal) {
-      const scope = await p.select({
-        message: 'Installation scope',
-        options: [
-          {
-            value: false,
-            label: 'Project',
-            hint: 'Install in current directory (committed with your project)',
-          },
-          {
-            value: true,
-            label: 'Global',
-            hint: 'Install in home directory (available across all projects)',
-          },
-        ],
-      });
-
-      if (p.isCancel(scope)) {
-        await cleanup(tempDir);
-        exitInstallationCancelled();
-      }
-
-      installGlobally = scope as boolean;
+    if (scope === undefined && !options.yes && supportsGlobal) {
+      scope = await promptForInstallScope(() => cleanup(tempDir));
     }
+    const installGlobally = scope ?? false;
 
     targetAgents = skipAgentsWithoutGlobalDir(targetAgents, {
       global: installGlobally,
